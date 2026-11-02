@@ -1,0 +1,15 @@
+[package]
+name = "sparse-ngram-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Performance benchmarks for sparse-ngram-search: indexing time, search time, and index size"
+
+[[bin]]
+name = "bench"
+path = "src/main.rs"
+
+[dependencies]
+sparse-ngram-core = { path = "../core" }
+anyhow.workspace = true
+tempfile = "3"

@@ -1,0 +1,20 @@
+[package]
+name = "sparse-ngram-git"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Git integration for sparse-ngram-search"
+
+[dependencies]
+sparse-ngram-core = { path = "../core" }
+anyhow.workspace = true
+thiserror.workspace = true
+git2.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ignore.workspace = true
+rayon.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,27 @@
+[package]
+name = "sngs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI tool for sparse n-gram search"
+
+[[bin]]
+name = "sngs"
+path = "src/main.rs"
+
+[dependencies]
+sparse-ngram-core = { path = "../core" }
+sparse-ngram-git = { path = "../git" }
+anyhow.workspace = true
+clap.workspace = true
+clap_complete.workspace = true
+serde_json.workspace = true
+ignore.workspace = true
+dirs.workspace = true
+regex.workspace = true
+rayon.workspace = true
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"

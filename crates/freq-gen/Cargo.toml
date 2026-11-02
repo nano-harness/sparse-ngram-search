@@ -1,0 +1,17 @@
+[package]
+name = "freq-gen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Frequency table generator for sparse-ngram-search"
+
+[[bin]]
+name = "freq-gen"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+rayon.workspace = true
+ignore.workspace = true
+byteorder.workspace = true
