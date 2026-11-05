@@ -185,7 +185,7 @@ fn print_stats(weights: &[u16; 65536], counts: &[u64; 65536]) {
 
     // Top 10 rarest pairs (highest weight, excluding zero counts).
     let mut indexed: Vec<(u16, usize)> = weights.iter().enumerate().map(|(i, &w)| (w, i)).collect();
-    indexed.sort_by(|a, b| b.0.cmp(&a.0));
+    indexed.sort_by_key(|x| std::cmp::Reverse(x.0));
     println!("Top 10 rarest pairs (highest weight):");
     for (w, idx) in indexed.iter().take(10) {
         let a = (idx / 256) as u8;
