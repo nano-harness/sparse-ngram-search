@@ -610,9 +610,8 @@ impl IndexReader {
         }
 
         let mut ids = Vec::with_capacity(len);
-        for chunk in self.postings_mmap[data_offset..data_end].chunks_exact(4) {
-            let id_bytes: [u8; 4] = chunk.try_into().unwrap();
-            ids.push(u32::from_le_bytes(id_bytes));
+        for chunk in self.postings_mmap[data_offset..data_end].as_chunks::<4>().0 {
+            ids.push(u32::from_le_bytes(*chunk));
         }
         Ok(ids)
     }
