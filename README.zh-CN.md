@@ -31,7 +31,7 @@
 
 ### 索引结构
 
-CLI 索引存储在源码目录下的 `.sngi-store/` 子目录中：
+默认情况下，CLI 索引存储在源码目录下的 `.sngi-store/` 子目录中：
 
 ```
 .sngi-store/
@@ -138,6 +138,25 @@ sngs init --no-ignore        # 非 Git 目录：包含被忽略的文件
 ```
 
 Git 仓库的索引遵循 Git 对已跟踪和未跟踪文件的管理方式；`--no-ignore` 目前不会生效，并会输出警告。
+
+### 外部索引与只读工作区
+
+默认情况下，`init` 会在工作区中创建 `.sngi-store/`，并为 Git 仓库将该目录添加到
+`.gitignore`。首次搜索 Git 仓库时，也会自动初始化缺失的索引。
+
+如果不希望在工作区内生成索引文件，请选择一个位于**工作区之外**的目录：
+
+```bash
+sngs --index-dir "$HOME/.cache/sngs" search --path /my/repo "ConnectionPool"
+# 或为所有命令配置相同的存储位置：
+export SNGS_INDEX_DIR="$HOME/.cache/sngs"
+sngs init --path /my/repo
+```
+
+外部索引根据工作区路径的哈希值，为每个工作区使用独立的子目录。使用外部存储时，
+初始化（包括自动初始化）不会创建或修改工作区中的 `.gitignore`，因此支持只读工作区。
+索引更新和工作区变更扫描缓存也使用同一外部位置。后续命令应继续使用该位置；
+`--index-dir` 的优先级高于 `SNGS_INDEX_DIR`。
 
 ### `search` — 搜索
 

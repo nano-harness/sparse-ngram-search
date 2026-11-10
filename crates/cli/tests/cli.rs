@@ -30,6 +30,216 @@ fn sngs() -> Command {
     Command::cargo_bin("sngs").expect("sngs binary must be available")
 }
 
+fn setup_git_dir(files: &[(&str, &str)]) -> TempDir {
+    let tmp = setup_dir(files);
+    for args in [
+        vec!["init", "-q"],
+        vec!["add", "."],
+        vec![
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "initial fixture",
+        ],
+    ] {
+        let output = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(tmp.path())
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    tmp
+}
+
+fn external_sngs(index_dir: &std::path::Path, via_env: bool) -> Command {
+    let mut command = sngs();
+    command.env("SNGS_NO_STATS", "1");
+    if via_env {
+        command.env("SNGS_INDEX_DIR", index_dir);
+    } else {
+        command
+            .env_remove("SNGS_INDEX_DIR")
+            .arg("--index-dir")
+            .arg(index_dir);
+    }
+    command
+}
+
+fn assert_external_index_preserves_worktree(
+    root: &std::path::Path,
+    index_dir: &std::path::Path,
+    gitignore: Option<&str>,
+) {
+    assert!(!root.join(".sngi-store").exists());
+    match gitignore {
+        Some(content) => assert_eq!(
+            fs::read(root.join(".gitignore")).unwrap(),
+            content.as_bytes()
+        ),
+        None => assert!(!root.join(".gitignore").exists()),
+    }
+    let stores: Vec<_> = fs::read_dir(index_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path().join(".sngi-store"))
+        .collect();
+    assert_eq!(stores.len(), 1);
+    assert!(stores[0].join("state.json").exists());
+    assert!(stores[0].join("head.txt").exists());
+
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+    assert!(
+        status.stdout.is_empty(),
+        "workspace changed: {}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+}
+
+// External indexes must never create or edit repository ignore rules, whether
+// selected by the CLI or the environment, or created explicitly or by search.
+#[test]
+fn cli_external_index_init_preserves_worktree() {
+    for via_env in [false, true] {
+        for gitignore in [None, Some("# existing rules\n/build")] {
+            let mut files = vec![("source.rs", "fn external_index_marker() {}\n")];
+            if let Some(content) = gitignore {
+                files.push((".gitignore", content));
+            }
+            let tmp = setup_git_dir(&files);
+            let cache = TempDir::new().unwrap();
+            let path = tmp.path().to_str().unwrap();
+
+            for command in ["init", "init", "sync", "rebuild"] {
+                external_sngs(cache.path(), via_env)
+                    .args([command, "--path", path])
+                    .assert()
+                    .success();
+                assert_external_index_preserves_worktree(tmp.path(), cache.path(), gitignore);
+            }
+            for _ in 0..2 {
+                external_sngs(cache.path(), via_env)
+                    .args(["search", "external_index_marker", "-l", "--path", path])
+                    .assert()
+                    .success()
+                    .stdout("source.rs\n");
+                assert_external_index_preserves_worktree(tmp.path(), cache.path(), gitignore);
+            }
+        }
+    }
+}
+
+#[test]
+fn cli_external_index_auto_init_preserves_worktree() {
+    for via_env in [false, true] {
+        for explicit_auto_init in [false, true] {
+            for gitignore in [None, Some("# existing rules\n/build")] {
+                let mut files = vec![("source.rs", "fn external_index_marker() {}\n")];
+                if let Some(content) = gitignore {
+                    files.push((".gitignore", content));
+                }
+                let tmp = setup_git_dir(&files);
+                let cache = TempDir::new().unwrap();
+                let mut command = external_sngs(cache.path(), via_env);
+                command.args([
+                    "search",
+                    "external_index_marker",
+                    "-l",
+                    "--path",
+                    tmp.path().to_str().unwrap(),
+                ]);
+                if explicit_auto_init {
+                    command.arg("--auto-init");
+                }
+                command
+                    .assert()
+                    .success()
+                    .stdout(predicate::str::contains("source.rs\n"));
+                assert_external_index_preserves_worktree(tmp.path(), cache.path(), gitignore);
+            }
+        }
+    }
+}
+
+#[test]
+fn cli_default_index_init_still_ignores_store() {
+    let tmp = setup_git_dir(&[
+        ("source.rs", "fn local_index_marker() {}\n"),
+        (".gitignore", "# existing rules\n/build"),
+    ]);
+    for _ in 0..2 {
+        sngs()
+            .env_remove("SNGS_INDEX_DIR")
+            .env("SNGS_NO_STATS", "1")
+            .args(["init", "--path", tmp.path().to_str().unwrap()])
+            .assert()
+            .success();
+        assert_eq!(
+            fs::read_to_string(tmp.path().join(".gitignore")).unwrap(),
+            "# existing rules\n/build\n.sngi-store/\n"
+        );
+        assert!(tmp.path().join(".sngi-store/state.json").exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_external_index_searches_readonly_git_repository() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = setup_git_dir(&[
+        ("source.rs", "fn external_index_marker() {}\n"),
+        (".gitignore", "# existing rules\n/build"),
+    ]);
+    let cache = TempDir::new().unwrap();
+    let root_permissions = fs::metadata(tmp.path()).unwrap().permissions();
+    let ignore_path = tmp.path().join(".gitignore");
+    let ignore_permissions = fs::metadata(&ignore_path).unwrap().permissions();
+    fs::set_permissions(&ignore_path, fs::Permissions::from_mode(0o444)).unwrap();
+    fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o555)).unwrap();
+
+    // Restore permissions before asserting so TempDir can always clean up.
+    let output = external_sngs(cache.path(), false)
+        .args([
+            "search",
+            "external_index_marker",
+            "--auto-init",
+            "-l",
+            "--path",
+            tmp.path().to_str().unwrap(),
+        ])
+        .output();
+    fs::set_permissions(tmp.path(), root_permissions).unwrap();
+    fs::set_permissions(ignore_path, ignore_permissions).unwrap();
+
+    let output = output.unwrap();
+    assert!(
+        output.status.success(),
+        "search failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("source.rs\n"));
+    assert_external_index_preserves_worktree(
+        tmp.path(),
+        cache.path(),
+        Some("# existing rules\n/build"),
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 1. init creates index; status shows file count
 // ---------------------------------------------------------------------------

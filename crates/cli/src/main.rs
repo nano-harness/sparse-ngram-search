@@ -26,7 +26,7 @@ use rayon::prelude::*;
 use sparse_ngram_core::index::IndexBuilder;
 use sparse_ngram_core::segment::{SegmentLevel, SegmentManager};
 use sparse_ngram_core::storage::should_skip_dir;
-use sparse_ngram_core::storage::{set_external_index_base, IndexStorePaths};
+use sparse_ngram_core::storage::{set_external_index_base, IndexStorePaths, INDEX_STORE_DIR};
 use sparse_ngram_core::{default_weight_fn, file_ngram_hashes, FrequencyWeight};
 use sparse_ngram_git::GitAwareIndex;
 
@@ -295,14 +295,17 @@ fn cmd_init(root: &Path, no_ignore: bool) -> Result<()> {
     let root = root.canonicalize().context("canonicalize path")?;
     let store = IndexStorePaths::new(&root);
 
-    // T16: Auto-add .sngi-store/ to .gitignore in git repos
     if is_git_repo(&root) {
         // F10: Warn if --no-ignore is used in a git repository
         if no_ignore {
             eprintln!("warning: --no-ignore is currently a no-op for git-tracked repositories");
         }
 
-        add_to_gitignore(&root)?;
+        // Only the default workspace-local store needs an ignore entry.
+        // External indexes must also work with an unmodified, read-only repo.
+        if store.root == root.join(INDEX_STORE_DIR) {
+            add_to_gitignore(&root)?;
+        }
 
         let start = Instant::now();
         let gi = GitAwareIndex::open_or_build(&root)?;

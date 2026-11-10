@@ -91,6 +91,15 @@ Global options include `--timeout <seconds>` for bounded searches and `--index-d
 
 Indexes are stored in `.sngi-store/` by default, or under the directory supplied with `--index-dir`. Usage statistics are local, not required for search, and can be disabled with `SNGS_NO_STATS=1`.
 
+For read-only analysis or workspaces that must stay unchanged, select an index
+directory outside the workspace before the first search, for example
+`sngs --index-dir "$HOME/.cache/sngs" search --json "ConnectionPool"`.
+Alternatively, set `SNGS_INDEX_DIR` to that external directory. Use the same
+location for later commands. External indexing leaves `.gitignore` untouched;
+the default in-workspace initialization adds a `.sngi-store/` ignore entry in
+Git repositories. Git searches initialize a missing index even without
+`--auto-init`.
+
 Do not publish indexes, search output, or local statistics when they reveal private source code or sensitive paths.
 
 ## Agent guidelines

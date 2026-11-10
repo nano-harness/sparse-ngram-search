@@ -40,7 +40,7 @@ Two extraction modes are provided:
 
 ### Index Structure
 
-The CLI index is stored in a `.sngi-store/` directory alongside your source files:
+By default, the CLI index is stored in a `.sngi-store/` directory alongside your source files:
 
 ```
 .sngi-store/
@@ -160,6 +160,28 @@ sngs init --no-ignore        # non-Git directories: include ignored files
 ```
 
 For Git repositories, the index follows Git's tracked and untracked-file model; `--no-ignore` is currently a no-op and produces a warning.
+
+### External indexes and read-only workspaces
+
+By default, `init` creates `.sngi-store/` in the workspace and adds it to
+`.gitignore` for Git repositories. A first search in a Git repository also
+initializes a missing index automatically.
+
+To keep index files out of the workspace, choose a directory **outside** it:
+
+```bash
+sngs --index-dir "$HOME/.cache/sngs" search --path /my/repo "ConnectionPool"
+# Or configure the same location for every command:
+export SNGS_INDEX_DIR="$HOME/.cache/sngs"
+sngs init --path /my/repo
+```
+
+External indexes use a separate, path-hashed subdirectory for each workspace.
+Initialization (including automatic initialization) does not create or edit the
+workspace's `.gitignore` when using external storage, so read-only workspaces
+are supported. Index updates and the dirty-scan cache use the same external
+location. Keep using that location for later commands; `--index-dir` takes
+precedence over `SNGS_INDEX_DIR`.
 
 ### `search` — Search
 
