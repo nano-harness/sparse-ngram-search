@@ -314,6 +314,76 @@ impl SegmentManager {
         Ok(id)
     }
 
+    /// Replace the complete index with one newly built segment.
+    ///
+    /// The current manager and manifest remain unchanged until the new segment
+    /// is complete and its manifest has been atomically published. Old segments
+    /// are retired only after that publication succeeds.
+    pub fn replace_all(
+        &mut self,
+        builder: IndexBuilder,
+        commit_range: Option<CommitRange>,
+        level: SegmentLevel,
+    ) -> Result<u64> {
+        // Reserve an unused directory, including after an interrupted attempt.
+        // Never overwrite an orphan that could contain stale deletion data.
+        let mut id = self.next_id;
+        let seg_dir = loop {
+            let path = segment_dir(&self.store_dir, id);
+            match std::fs::create_dir(&path) {
+                Ok(()) => break path,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    id = id.checked_add(1).context("segment ID exhausted")?;
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| format!("reserve segment {id}"));
+                }
+            }
+        };
+
+        let replacement = (|| -> Result<Self> {
+            let index = builder
+                .build(&seg_dir)
+                .with_context(|| format!("build replacement segment {id}"))?;
+            let replacement = Self {
+                segments: vec![Segment {
+                    id,
+                    level,
+                    index,
+                    commit_range,
+                }],
+                deletions: SegmentDeletions::new(),
+                store_dir: self.store_dir.clone(),
+                next_id: id.checked_add(1).context("segment ID exhausted")?,
+                path_index: None,
+            };
+            replacement.save_state()?;
+            Ok(replacement)
+        })();
+        let replacement = match replacement {
+            Ok(replacement) => replacement,
+            Err(error) => {
+                // The failed candidate's mmaps have been dropped by this point.
+                let _ = std::fs::remove_dir_all(&seg_dir);
+                return Err(error);
+            }
+        };
+
+        let retired = std::mem::replace(self, replacement);
+        let retired_dirs: Vec<_> = retired
+            .segments
+            .iter()
+            .map(|segment| segment_dir(&retired.store_dir, segment.id))
+            .collect();
+        // Close old mmaps before cleanup, including on Windows. Cleanup errors
+        // must not turn an already-published replacement into a reported failure.
+        drop(retired);
+        for dir in retired_dirs {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        Ok(id)
+    }
+
     /// Mark every occurrence of `path` across all segments as deleted.
     ///
     /// Use this to hide a path that should no longer appear in search results,
@@ -1017,6 +1087,121 @@ mod tests {
     // -----------------------------------------------------------------------
     // add_segment
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_replace_all_retires_old_segments_and_deletions() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let mut mgr = SegmentManager::create(tmp.path())?;
+        let old_id = mgr.add_segment(
+            make_segment_builder(&[("kept.rs", b"replacement_marker old")])?,
+            None,
+            SegmentLevel::L3,
+        )?;
+        let removed_id = mgr.add_segment(
+            make_segment_builder(&[("removed.rs", b"replacement_marker removed")])?,
+            None,
+            SegmentLevel::L1,
+        )?;
+        // Populate both the deletion bitmap and the lazy path index.
+        mgr.mark_deleted(Path::new("kept.rs"))?;
+        let replacement: &[(&str, &[u8])] = &[
+            ("kept.rs", b"replacement_marker updated"),
+            ("new.rs", b"replacement_marker new"),
+        ];
+        let id = mgr.replace_all(make_segment_builder(replacement)?, None, SegmentLevel::L3)?;
+        assert_eq!(mgr.segment_count(), 1);
+        assert!(id > removed_id);
+        assert!(!segment_dir(tmp.path(), old_id).exists());
+        assert!(!segment_dir(tmp.path(), removed_id).exists());
+
+        // A retired path must stay absent even if it still exists on disk
+        // (for example, because a new ignore rule excluded it).
+        let all_files: &[(&str, &[u8])] = &[
+            replacement[0],
+            replacement[1],
+            ("removed.rs", b"replacement_marker removed"),
+        ];
+        assert_eq!(
+            mgr.search("replacement_marker", content_loader(all_files), None)?
+                .len(),
+            2
+        );
+        mgr.mark_deleted(Path::new("new.rs"))?;
+        drop(mgr);
+        let reopened = SegmentManager::open(tmp.path())?;
+        let results = reopened.search("replacement_marker", content_loader(all_files), None)?;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path, PathBuf::from("kept.rs"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_replace_all_manifest_failure_preserves_index_and_allows_retry() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let mut mgr = SegmentManager::create(tmp.path())?;
+        let original: &[(&str, &[u8])] = &[("original.rs", b"original_marker")];
+        mgr.add_segment(make_segment_builder(original)?, None, SegmentLevel::L3)?;
+        let old_state = std::fs::read(tmp.path().join(STATE_FILE))?;
+        // write_atomic must fail at manifest publication, after segment build.
+        let obstruction = tmp.path().join("state.tmp");
+        std::fs::create_dir(&obstruction)?;
+        let replacement: &[(&str, &[u8])] = &[("new.rs", b"replacement_marker")];
+        assert!(mgr
+            .replace_all(make_segment_builder(replacement)?, None, SegmentLevel::L3)
+            .is_err());
+        assert_eq!(std::fs::read(tmp.path().join(STATE_FILE))?, old_state);
+        assert_eq!(mgr.segment_count(), 1);
+        assert_eq!(
+            mgr.search("original_marker", content_loader(original), None)?
+                .len(),
+            1
+        );
+        assert!(!segment_dir(tmp.path(), 1).exists());
+        let reopened = SegmentManager::open(tmp.path())?;
+        assert_eq!(
+            reopened
+                .search("original_marker", content_loader(original), None)?
+                .len(),
+            1
+        );
+        drop(reopened);
+        std::fs::remove_dir(obstruction)?;
+
+        // Simulate a candidate abandoned by a killed process. Reusing it could
+        // accidentally load a stale deletion bitmap, so reserve a different id.
+        let orphan = segment_dir(tmp.path(), 1);
+        std::fs::create_dir(&orphan)?;
+        std::fs::write(orphan.join("deletion.bin"), b"stale deletion data")?;
+        let new_id = mgr.replace_all(make_segment_builder(replacement)?, None, SegmentLevel::L3)?;
+        assert_eq!(new_id, 2);
+        drop(mgr);
+        let reopened = SegmentManager::open(tmp.path())?;
+        assert_eq!(
+            reopened
+                .search("replacement_marker", content_loader(replacement), None)?
+                .len(),
+            1
+        );
+        assert_eq!(reopened.segment_count(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn test_replace_all_accepts_empty_index() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let mut mgr = SegmentManager::create(tmp.path())?;
+        let original: &[(&str, &[u8])] = &[("original.rs", b"original_marker")];
+        mgr.add_segment(make_segment_builder(original)?, None, SegmentLevel::L3)?;
+        mgr.replace_all(make_segment_builder(&[])?, None, SegmentLevel::L3)?;
+        drop(mgr);
+        let reopened = SegmentManager::open(tmp.path())?;
+        assert_eq!(reopened.segment_count(), 1);
+        assert_eq!(reopened.segments()[0].index.file_count(), 0);
+        assert!(reopened
+            .search("original_marker", content_loader(original), None)?
+            .is_empty());
+        Ok(())
+    }
 
     #[test]
     fn test_add_segment_assigns_sequential_ids() -> Result<()> {

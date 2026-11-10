@@ -198,6 +198,119 @@ fn cli_default_index_init_still_ignores_store() {
 
 #[cfg(unix)]
 #[test]
+fn cli_non_git_sync_write_failure_preserves_index() {
+    let tmp = setup_dir(&[("source.rs", "fn preserved_index_marker() {}\n")]);
+    let cache = TempDir::new().unwrap();
+    external_sngs(cache.path(), false)
+        .args(["init", "--path", tmp.path().to_str().unwrap()])
+        .assert()
+        .success();
+    let store = fs::read_dir(cache.path())
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path()
+        .join(".sngi-store");
+    let old_state = fs::read(store.join("state.json")).unwrap();
+    let old_lookup = fs::read(store.join("segments/segment_0/lookup.bin")).unwrap();
+
+    // A child-only file-size limit forces a real write failure during rebuild.
+    // No artificial failures are introduced into production code.
+    Command::new("sh")
+        .args([
+            "-c",
+            "ulimit -c 0; ulimit -f 0; exec \"$@\"",
+            "sngs-write-failure",
+        ])
+        .arg(assert_cmd::cargo::cargo_bin!("sngs"))
+        .env("SNGS_NO_STATS", "1")
+        .env_remove("SNGS_INDEX_DIR")
+        .arg("--index-dir")
+        .arg(cache.path())
+        .args(["sync", "--path", tmp.path().to_str().unwrap()])
+        .assert()
+        .failure();
+
+    assert_eq!(fs::read(store.join("state.json")).unwrap(), old_state);
+    assert_eq!(
+        fs::read(store.join("segments/segment_0/lookup.bin")).unwrap(),
+        old_lookup
+    );
+    external_sngs(cache.path(), false)
+        .args([
+            "search",
+            "preserved_index_marker",
+            "-l",
+            "--path",
+            tmp.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout("source.rs\n");
+
+    // A later successful sync must recover even if the interrupted child left
+    // an unpublished segment directory behind.
+    external_sngs(cache.path(), false)
+        .args(["sync", "--path", tmp.path().to_str().unwrap()])
+        .assert()
+        .success();
+}
+
+#[test]
+fn cli_non_git_sync_replaces_complete_snapshot() {
+    let tmp = setup_dir(&[
+        ("keep.rs", "fn lifecycle_marker_old() {}\n"),
+        ("deleted.rs", "fn lifecycle_marker_deleted() {}\n"),
+        ("rename.rs", "fn lifecycle_marker_renamed() {}\n"),
+        ("ignored.rs", "fn lifecycle_marker_ignored() {}\n"),
+        ("binary.rs", "fn lifecycle_marker_binary() {}\n"),
+    ]);
+    let cache = TempDir::new().unwrap();
+    let path = tmp.path().to_str().unwrap();
+    external_sngs(cache.path(), false)
+        .args(["init", "--path", path])
+        .assert()
+        .success();
+    fs::write(tmp.path().join("keep.rs"), "fn lifecycle_marker_new() {}\n").unwrap();
+    fs::remove_file(tmp.path().join("deleted.rs")).unwrap();
+    fs::rename(tmp.path().join("rename.rs"), tmp.path().join("renamed.rs")).unwrap();
+    fs::write(tmp.path().join(".ignore"), "ignored.rs\n").unwrap();
+    fs::write(tmp.path().join("binary.rs"), b"\0lifecycle_marker_binary").unwrap();
+
+    for _ in 0..2 {
+        external_sngs(cache.path(), false)
+            .args(["sync", "--path", path])
+            .assert()
+            .success();
+        external_sngs(cache.path(), false)
+            .args(["search", "lifecycle_marker", "-l", "--path", path])
+            .assert()
+            .success()
+            .stdout("keep.rs\nrenamed.rs\n");
+        external_sngs(cache.path(), false)
+            .args(["status", "--path", path])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Segments        : 1\n"));
+    }
+
+    for entry in fs::read_dir(tmp.path()).unwrap() {
+        fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+    external_sngs(cache.path(), false)
+        .args(["sync", "--path", path])
+        .assert()
+        .success();
+    external_sngs(cache.path(), false)
+        .args(["search", "lifecycle_marker", "--json", "--path", path])
+        .assert()
+        .code(1)
+        .stdout("[]\n");
+}
+
+#[cfg(unix)]
+#[test]
 fn cli_external_index_searches_readonly_git_repository() {
     use std::os::unix::fs::PermissionsExt;
 

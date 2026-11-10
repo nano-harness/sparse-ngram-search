@@ -472,25 +472,21 @@ fn cmd_sync(root: &Path) -> Result<()> {
     let start = Instant::now();
 
     // Open the store, rebuild all segments
-    let mgr = SegmentManager::open(&store.root)?;
+    let mut mgr = SegmentManager::open(&store.root)?;
 
     // For now, do a full rebuild (same as before)
     // TODO: Implement incremental sync for non-git directories
     let mut builder = IndexBuilder::with_default_weights();
     collect_files_into_builder(&root, false, &mut builder)?;
 
-    // Remove old store and create fresh one
-    drop(mgr); // Close before removing
-    std::fs::remove_dir_all(&store.root)
-        .with_context(|| format!("remove store at {:?}", store.root))?;
-
-    let mut new_mgr = SegmentManager::create(&store.root)?;
-    new_mgr.add_segment(builder, None, SegmentLevel::L3)?;
+    // Publish a complete replacement before retiring the old segments. A build
+    // or manifest write failure must leave the last valid index searchable.
+    mgr.replace_all(builder, None, SegmentLevel::L3)?;
 
     println!(
         "Done: {} files, {} n-gram tokens in {:.2}s",
-        new_mgr.segments()[0].index.file_count(),
-        new_mgr.segments()[0].index.ngram_count(),
+        mgr.segments()[0].index.file_count(),
+        mgr.segments()[0].index.ngram_count(),
         start.elapsed().as_secs_f64()
     );
     Ok(())

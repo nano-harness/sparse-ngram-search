@@ -231,6 +231,9 @@ sngs sync --path /my/repo
 ```
 
 Git repositories use incremental overlay updates. Non-Git directories currently perform a full rebuild.
+For non-Git `sync`, the replacement segment is fully written before its manifest
+is atomically published. A build or manifest-write failure leaves the previous
+index available; old segments are removed only after successful publication.
 
 ### `status` — Index metadata
 
