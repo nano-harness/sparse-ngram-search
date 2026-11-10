@@ -243,7 +243,9 @@ fn dispatch(command: Command, timeout_secs: u64) -> Result<bool> {
     };
 
     match command {
-        Command::Init { path, no_ignore } => cmd_init(&path, no_ignore).map(|_| true),
+        Command::Init { path, no_ignore } => {
+            cmd_init(&path, no_ignore, &mut std::io::stdout()).map(|_| true)
+        }
         Command::Sync { path } => cmd_sync(&path).map(|_| true),
         Command::Search {
             pattern,
@@ -291,7 +293,7 @@ fn dispatch(command: Command, timeout_secs: u64) -> Result<bool> {
 // Commands
 // ---------------------------------------------------------------------------
 
-fn cmd_init(root: &Path, no_ignore: bool) -> Result<()> {
+fn cmd_init(root: &Path, no_ignore: bool, progress: &mut dyn std::io::Write) -> Result<()> {
     let root = root.canonicalize().context("canonicalize path")?;
     let store = IndexStorePaths::new(&root);
 
@@ -309,13 +311,14 @@ fn cmd_init(root: &Path, no_ignore: bool) -> Result<()> {
 
         let start = Instant::now();
         let gi = GitAwareIndex::open_or_build(&root)?;
-        println!(
+        writeln!(
+            progress,
             "Git-aware index ready at {:?} (base {}, {} segment(s)) in {:.2}s",
             store.root,
             short_commit(gi.base_commit()),
             gi.segment_count(),
             start.elapsed().as_secs_f64()
-        );
+        )?;
         return Ok(());
     }
 
@@ -328,7 +331,7 @@ fn cmd_init(root: &Path, no_ignore: bool) -> Result<()> {
         return Ok(());
     }
 
-    println!("Building index for {:?} …", root);
+    writeln!(progress, "Building index for {:?} …", root)?;
     let start = Instant::now();
 
     // Build the index using SegmentManager
@@ -339,12 +342,13 @@ fn cmd_init(root: &Path, no_ignore: bool) -> Result<()> {
     let mut mgr = SegmentManager::create(&store.root)?;
     mgr.add_segment(builder, None, SegmentLevel::L3)?;
 
-    println!(
+    writeln!(
+        progress,
         "Done: {} files, {} n-gram tokens in {:.2}s",
         mgr.segments()[0].index.file_count(),
         mgr.segments()[0].index.ngram_count(),
         start.elapsed().as_secs_f64()
-    );
+    )?;
     Ok(())
 }
 
@@ -572,7 +576,8 @@ fn cmd_search(
     if !store.root.join("state.json").exists() {
         if auto_init || is_git_repo(&root) {
             eprintln!("no index found at {:?}; building one now …", store.root);
-            cmd_init(&root, false)?;
+            // Keep search stdout reserved for results, including first-run JSON.
+            cmd_init(&root, false, &mut std::io::stderr())?;
         } else {
             bail!(
                 "no index found at {:?}; run `sngs init` first or retry with `sngs search --auto-init ...`",

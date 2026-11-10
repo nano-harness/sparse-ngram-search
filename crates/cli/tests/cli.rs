@@ -840,6 +840,54 @@ fn cli_search_auto_init_builds_missing_index() {
 }
 
 #[test]
+fn cli_search_auto_init_json_keeps_stdout_parseable() {
+    for (git_repo, explicit_auto_init) in [(false, true), (true, true), (true, false)] {
+        for has_match in [false, true] {
+            let files = [("source.rs", "fn json_auto_init_marker() {}\n")];
+            let tmp = if git_repo {
+                setup_git_dir(&files)
+            } else {
+                setup_dir(&files)
+            };
+            let cache = TempDir::new().unwrap();
+            let pattern = if has_match {
+                "json_auto_init_marker"
+            } else {
+                "missing_json_marker"
+            };
+            // Both the initial build and later searches must emit only JSON.
+            for first_search in [true, false] {
+                let mut command = external_sngs(cache.path(), false);
+                command.args([
+                    "search",
+                    pattern,
+                    "--json",
+                    "--path",
+                    tmp.path().to_str().unwrap(),
+                ]);
+                if explicit_auto_init {
+                    command.arg("--auto-init");
+                }
+                let assertion = command.assert().code(if has_match { 0 } else { 1 });
+                let output = assertion.get_output();
+                let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)
+                    .expect("entire stdout must be valid JSON, including on the first search");
+                if has_match {
+                    assert_eq!(parsed[0]["path"], "source.rs");
+                    assert_eq!(parsed[0]["match_count"], 1);
+                } else {
+                    assert_eq!(parsed, serde_json::json!([]));
+                }
+                assert_eq!(
+                    String::from_utf8_lossy(&output.stderr).contains("building one now"),
+                    first_search
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn cli_search_json_output() {
     let tmp = setup_dir(&[("json.rs", "fn json_marker() {}\n")]);
 

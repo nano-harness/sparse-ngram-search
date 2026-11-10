@@ -186,6 +186,9 @@ sngs search --json "ConnectionPool"
 sngs search --grep --glob "src/*" --type rs "ConnectionPool"
 ```
 
+搜索触发的索引初始化进度会写入 stderr，因此即使首次搜索需要创建索引，
+`--json` 的 stdout 也始终是合法 JSON。没有匹配时输出 `[]`，退出码为 `1`。
+
 默认输出格式：
 
 ```

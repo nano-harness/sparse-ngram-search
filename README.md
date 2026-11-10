@@ -211,6 +211,10 @@ sngs search --json "ConnectionPool"
 sngs search --grep --glob "src/*" --type rs "ConnectionPool"
 ```
 
+Search initialization progress is written to stderr, so `--json` stdout remains
+valid JSON even when the first search creates the index. No matches produces
+`[]` and exit code `1`.
+
 Default output format:
 
 ```
